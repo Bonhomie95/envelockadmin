@@ -1,4 +1,5 @@
 const TOKEN_KEY = "envelock.admin_token";
+const REFRESH_KEY = "envelock.admin_refresh";
 
 export class ApiError extends Error {
   status: number;
@@ -19,23 +20,71 @@ export const auth = {
   get token() {
     return localStorage.getItem(TOKEN_KEY);
   },
-  set(token: string) {
+  get refreshToken() {
+    return localStorage.getItem(REFRESH_KEY);
+  },
+  set(token: string, refresh?: string | null) {
     localStorage.setItem(TOKEN_KEY, token);
+    if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
   },
   clear() {
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(REFRESH_KEY);
   },
   get signedIn() {
     return Boolean(localStorage.getItem(TOKEN_KEY));
   },
 };
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+// Keep a long-lived operator session alive past the 15-minute access-token TTL by
+// exchanging the refresh token on a 401, then replaying the request once.
+let refreshInFlight: Promise<boolean> | null = null;
+async function tryRefresh(): Promise<boolean> {
+  const rt = auth.refreshToken;
+  if (!rt) return false;
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const res = await fetch("/api/v1/auth/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: rt }),
+        });
+        if (!res.ok) {
+          auth.clear();
+          return false;
+        }
+        const b = (await res.json()) as { access_token: string; refresh_token?: string };
+        auth.set(b.access_token, b.refresh_token);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        refreshInFlight = null;
+      }
+    })();
+  }
+  return refreshInFlight;
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  retried = false,
+): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   const token = auth.token;
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const res = await fetch(path, { ...init, headers });
+  if (
+    res.status === 401 &&
+    !retried &&
+    auth.refreshToken &&
+    !path.includes("/auth/")
+  ) {
+    if (await tryRefresh()) return request<T>(path, init, true);
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -145,12 +194,12 @@ export const api = {
       { method: "POST", body: JSON.stringify({ email, password }) },
     ),
   mfaSkip: (mfaToken: string) =>
-    request<{ access_token: string }>("/api/v1/auth/mfa/skip", {
+    request<{ access_token: string; refresh_token?: string }>("/api/v1/auth/mfa/skip", {
       method: "POST",
       body: JSON.stringify({ token: mfaToken }),
     }),
   mfaVerify: (mfaToken: string, code: string) =>
-    request<{ access_token: string }>("/api/v1/auth/mfa/verify", {
+    request<{ access_token: string; refresh_token?: string }>("/api/v1/auth/mfa/verify", {
       method: "POST",
       body: JSON.stringify({ mfa_token: mfaToken, code }),
     }),

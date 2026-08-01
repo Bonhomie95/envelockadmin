@@ -18,8 +18,8 @@ export default function Login({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function finish(token: string) {
-    auth.set(token);
+  async function finish(token: string, refresh?: string) {
+    auth.set(token, refresh);
     try {
       await api.whoami();
       navigate("/");
@@ -43,8 +43,8 @@ export default function Login({
       setMfaToken(r.mfa_token);
       if (r.mfa_setup_required) {
         // MFA not enrolled — a session is issued now (MFA is deferrable).
-        const { access_token } = await api.mfaSkip(r.mfa_token);
-        await finish(access_token);
+        const s = await api.mfaSkip(r.mfa_token);
+        await finish(s.access_token, s.refresh_token);
       } else {
         setStep("code");
       }
@@ -60,8 +60,8 @@ export default function Login({
     setBusy(true);
     setError(null);
     try {
-      const { access_token } = await api.mfaVerify(mfaToken, code.trim());
-      await finish(access_token);
+      const v = await api.mfaVerify(mfaToken, code.trim());
+      await finish(v.access_token, v.refresh_token);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Invalid code.");
     } finally {
